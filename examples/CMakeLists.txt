@@ -22,6 +22,7 @@ endif()
 add_subdirectory(triangle)
 add_subdirectory(cube)
 add_subdirectory(deferred_renderer)
+add_subdirectory(raytrace)
 
 function(NoGraphicsAPI_make_release_gui target)
     if(WIN32)

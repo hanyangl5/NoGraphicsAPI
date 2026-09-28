@@ -225,6 +225,7 @@ the library without examples and tests.
 - [Triangle](examples/triangle/triangle.cpp) — the smallest rendering example.
 - [Cube](examples/cube/cube.cpp) — GPU-pointer vertex fetch and bindless textures.
 - [Deferred renderer](examples/deferred_renderer/deferred_renderer.cpp) — compute simulation and mesh-shader rendering.
+- [Ray tracing](examples/raytrace/README.md) — GPU PLOC construction and software ray queries through GPU pointers.
 
 The executables are under `build-msvc/examples/<example>/Release` when using the supplied preset.
 

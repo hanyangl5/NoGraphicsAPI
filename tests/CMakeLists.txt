@@ -3,6 +3,39 @@ NoGraphicsAPI_disable_exceptions(test_shader_types)
 target_link_libraries(test_shader_types PRIVATE NoGraphicsAPIUtility::types)
 add_test(NAME test_shader_types COMMAND test_shader_types)
 
+if(NOT COMMAND NoGraphicsAPI_compile_slang)
+    include(${PROJECT_SOURCE_DIR}/examples/NoGraphicsAPI_slang.cmake)
+endif()
+# The raw Vulkan harness exercises these kernels independently of the native backend.
+if(NOT APPLE)
+    set(raytrace_source ${PROJECT_SOURCE_DIR}/examples/raytrace)
+    set(raytrace_shader_dir ${CMAKE_CURRENT_BINARY_DIR}/shaders/raytrace)
+    set(raytrace_spirv)
+    set(raytrace_common ${raytrace_source}/raytrace_types.h ${raytrace_source}/primitive.slang ${raytrace_source}/transform.slang)
+    set(raytrace_query ${raytrace_common} ${raytrace_source}/bvh.slang ${raytrace_source}/query.slang
+        ${raytrace_source}/ray_functions.slang ${raytrace_source}/ray_functions_shared.h)
+    foreach(shader IN ITEMS morton sort ploc refit import refit_import batch export)
+        set(output ${raytrace_shader_dir}/${shader}.comp.spv)
+        NoGraphicsAPI_compile_slang(${output} ${raytrace_source}/${shader}.slang computeMain compute
+            DEFINES NOGRAPHICSAPI_ROOT_PHYSICAL DEPENDS ${raytrace_source}/${shader}_shared.h ${raytrace_source}/ploc_shared.h
+                ${raytrace_source}/ploc_common.slang ${raytrace_source}/morton_code.slang ${raytrace_source}/bounds_encoding.slang ${raytrace_common})
+        list(APPEND raytrace_spirv ${output})
+    endforeach()
+    NoGraphicsAPI_compile_slang(${raytrace_shader_dir}/query.comp.spv ${CMAKE_CURRENT_SOURCE_DIR}/raytrace_query.slang computeMain compute
+        DEFINES NOGRAPHICSAPI_ROOT_PHYSICAL DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/raytrace_query_shared.h ${raytrace_query})
+    add_executable(test_raytrace raytrace_test.cpp raytrace_feature_cases.hpp raytrace_import_cases.hpp
+        raytrace_sort_commands.hpp raytrace_sort_cases.hpp raytrace_batch_cases.hpp raytrace_import_batch_cases.hpp ${raytrace_source}/build.cpp
+        ${raytrace_spirv} ${raytrace_shader_dir}/query.comp.spv)
+    NoGraphicsAPI_disable_exceptions(test_raytrace)
+    target_include_directories(test_raytrace PRIVATE ${PROJECT_SOURCE_DIR}/examples/common)
+    target_link_libraries(test_raytrace PRIVATE NoGraphicsAPIUtility::types NoGraphicsAPIUtility::allocators Vulkan::Vulkan)
+    if(WIN32)
+        target_compile_definitions(test_raytrace PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    add_test(NAME test_raytrace COMMAND test_raytrace ${raytrace_shader_dir})
+    set_tests_properties(test_raytrace PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180 FAIL_REGULAR_EXPRESSION "Raytrace validation:")
+endif()
+
 add_executable(test_math math_test.cpp)
 NoGraphicsAPI_disable_exceptions(test_math)
 target_link_libraries(test_math PRIVATE NoGraphicsAPIUtility::math)

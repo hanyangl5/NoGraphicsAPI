@@ -42,7 +42,7 @@ endif()
 function(NoGraphicsAPI_compile_slang output source entry stage)
     cmake_parse_arguments(SLANG "" "" "DEPENDS;DEFINES;OPTIONS" ${ARGN})
     get_filename_component(output_dir "${output}" DIRECTORY)
-    set(dependencies ${source} ${SLANG_DEPENDS}
+    set(dependencies ${source} ${SLANG_DEPENDS} ${NOGRAPHICSAPI_SLANGC}
         ${PROJECT_SOURCE_DIR}/include/NoGraphicsAPI/types.h
         ${PROJECT_SOURCE_DIR}/include/NoGraphicsAPI/shader.slang
         ${PROJECT_SOURCE_DIR}/utility/include/NoGraphicsAPIUtility/shader_types.h)
@@ -80,7 +80,7 @@ function(NoGraphicsAPI_compile_slang output source entry stage)
             COMMAND ${NOGRAPHICSAPI_SLANGC} ${source} -target spirv -profile spirv_1_5
                 -emit-spirv-directly -fvk-use-entrypoint-name ${common_options} ${options} -o ${output}
             COMMAND ${NOGRAPHICSAPI_SPIRV_VAL} --target-env vulkan1.4 --scalar-block-layout ${output}
-            DEPENDS ${dependencies}
+            DEPENDS ${dependencies} ${NOGRAPHICSAPI_SPIRV_VAL}
             VERBATIM
             COMMENT "Compiling and validating Slang ${stage} shader ${entry} to SPIR-V"
         )
