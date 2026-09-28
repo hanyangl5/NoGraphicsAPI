@@ -142,6 +142,8 @@ Batch coverage includes 48 triangle/AABB/scene trees through 512 primitives, ind
 PLOC/LBVH refit compatibility, queries, root-bounds export, and a 512-leaf chain with depth 511 and a nonzero root.
 Bulk import covers mixed tree sizes, exact allocation capacity, shuffled nodes, repeated primitive IDs, segmented import/refit and poisoned source arrays.
 The harness calls the storage-size/allocation APIs directly but records GPU kernels through Vulkan; it does not exercise `ComputeBatch` submission.
+The native example has also completed on an RTX 3080 with NVIDIA driver 617.14, producing its PNG and bounds readback with no Debug validation messages.
+That run covers the example's build, import, export, trace, and `ComputeBatch` path; the broader regression cases still use the raw Vulkan harness.
 
 ## Remaining HIPRT alignment
 
@@ -150,7 +152,7 @@ The harness calls the storage-size/allocation APIs directly but records GPU kern
 | Build algorithms | H-PLOC, fast/balanced/high-quality modes, spatial splits, triangle pairing and oriented bounds |
 | SDK operations | Compaction and geometry/scene serialization |
 | Traversal integration | Configurable traversal stacks/hints and runtime compilation/linking of application callbacks |
-| Verification | Native wrapper execution on a driver supporting its required extensions, and direct comparison against HIPRT |
+| Verification | Broader native-wrapper regression coverage and direct comparison against HIPRT |
 
 These are implementation and verification gaps; successful kernel regressions do not establish full HIPRT parity.
 

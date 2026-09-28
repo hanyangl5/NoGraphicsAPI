@@ -35,7 +35,7 @@ conventional feature checked by device creation.
 | Core Vulkan dynamic state | Command-set viewport, scissor, and exposed depth/stencil state. |
 | Timeline semaphores | Application-visible completion points and cross-queue waits; private swapchain retirement. |
 | 64-bit timestamps (optional) | Supported queues capture GPU markers; `read_timestamps(pool)` retrieves them into CPU memory after submission completion. |
-| Shader and layout features | Scalar layout, float16, 16-bit push/storage access, draw parameters, independent blending, and formatless storage-image access. |
+| Shader and layout features | Scalar layout, float16, int64, 16-bit push/storage access, draw parameters, independent blending, and formatless storage-image access. |
 | Texture features | At least BC or ASTC LDR compression; exact format and usage support remains queryable. |
 | Win32 WSI | `VK_KHR_surface`, `VK_KHR_win32_surface`, `VK_KHR_swapchain`, and the maintenance extensions listed below. |
 
@@ -54,6 +54,8 @@ There is no host-only or non-coherent fallback path.
 
 `create_gpu_heap()` returns one application-sized block. `cpu_visible`, `gpu_only`, and `readback`
 provide addressable data storage. Opaque texture and sampler descriptor heaps use separate creation APIs.
+`readback` prefers CPU-cached memory within the same device-local requirements; caching is not guaranteed.
+For repeated CPU reads such as image encoding, copy completed readback data once into ordinary CPU memory.
 `GpuCpuRange<T>::size` is always bytes, regardless of `T`, and a GPU-only heap has a null CPU pointer.
 
 Application data has no backend suballocator. The optional utility library provides fixed-16-byte

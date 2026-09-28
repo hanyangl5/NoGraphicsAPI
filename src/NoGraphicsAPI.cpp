@@ -1483,6 +1483,7 @@ Error inspect_candidate(VkPhysicalDevice physical_device, VkSurfaceKHR surface, 
     vkGetPhysicalDeviceFeatures2(physical_device, &features.core);
     const bool required_features =
         features.core.features.shaderInt16 == VK_TRUE &&
+        features.core.features.shaderInt64 == VK_TRUE &&
         features.core.features.samplerAnisotropy == VK_TRUE &&
         features.core.features.depthBiasClamp == VK_TRUE &&
         features.core.features.independentBlend == VK_TRUE &&
@@ -1779,6 +1780,7 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
     enabled_features.core.features.imageCubeArray = selected.image_cube_array;
     enabled_features.core.features.samplerAnisotropy = VK_TRUE;
     enabled_features.core.features.shaderInt16 = VK_TRUE;
+    enabled_features.core.features.shaderInt64 = VK_TRUE;
     enabled_features.core.features.depthBiasClamp = VK_TRUE;
     enabled_features.core.features.independentBlend = VK_TRUE;
     enabled_features.core.features.textureCompressionBC = selected.texture_compression_bc;

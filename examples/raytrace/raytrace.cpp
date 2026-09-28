@@ -214,7 +214,10 @@ int main()
     for (uint32 i = 0; i < 4; i++)
         printf("%s %u AABB: (%g, %g, %g) - (%g, %g, %g)\n", i == 3 ? "TLAS" : "BLAS", i,
             bounds.cpu[i].bmin.x, bounds.cpu[i].bmin.y, bounds.cpu[i].bmin.z, bounds.cpu[i].bmax.x, bounds.cpu[i].bmax.y, bounds.cpu[i].bmax.z);
-    const int written = stbi_write_png(output_path, (int)image_width, (int)image_height, 4, pixels.cpu, (int)image_width * 4);
+    // PNG filters revisit pixels; copy once out of the potentially uncached mapped heap.
+    static uint32 image_pixels[image_width * image_height];
+    memcpy(image_pixels, pixels.cpu, sizeof(image_pixels));
+    const int written = stbi_write_png(output_path, (int)image_width, (int)image_height, 4, image_pixels, (int)image_width * 4);
     printf("%s %s\n", written ? "wrote" : "failed to write", output_path);
 
     wait_idle(device);
