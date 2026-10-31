@@ -34,14 +34,19 @@ UploadQueue::UploadQueue(Device* device, uint64 capacity, uint32 queue_index, ui
         state_.texture_granularity = caps.copy_texture_granularity;
     }
     state_.heap = create_gpu_heap(device, capacity, MemoryType::cpu_visible);
+    if (!state_.heap.owner) { destroy(); return; }
     state_.completion.semaphore = create_timeline_semaphore(device);
+    if (!state_.completion.semaphore) { destroy(); return; }
     state_.batches = new Batch[max_pending_batches]{};
     state_.max_pending_batches = max_pending_batches;
     for (uint32 index = 0; index < max_pending_batches; ++index)
     {
         Batch& batch = state_.batches[index];
         batch.pool = create_command_pool(device, queue_index);
-        end_commands(begin_commands(batch.pool));
+        if (!batch.pool) { destroy(); return; }
+        CommandBuffer* commands = begin_commands(batch.pool);
+        if (!commands) { destroy(); return; }
+        end_commands(commands);
         reset_command_pool(batch.pool);
     }
 }
@@ -206,7 +211,8 @@ TimelinePoint UploadQueue::flush() noexcept
     barrier(state.commands, state.upload_stages, state.upload_access, Stage::all_commands, state.queue_access);
     end_commands(state.commands);
     ++state.completion.value;
-    submit(state.device, {.commands = {state.commands}, .completion = state.completion}, state.queue_index);
+    if (state.submit_callback) state.submit_callback(state.submit_context, state.device, state.commands, state.completion, state.queue_index);
+    else submit(state.device, {.commands = {state.commands}, .completion = state.completion}, state.queue_index);
     Batch& batch = state.batches[(state.retirement_first + state.retirement_count) % state.max_pending_batches];
     batch.end = state.head;
     batch.value = state.completion.value;
@@ -215,6 +221,13 @@ TimelinePoint UploadQueue::flush() noexcept
     state.commands = nullptr;
     state.operation_count = 0;
     return state.completion;
+}
+
+void UploadQueue::set_submit_callback(SubmitCallback callback, void* context) noexcept
+{
+    assert(!state_.in_callback);
+    state_.submit_callback = callback;
+    state_.submit_context = context;
 }
 
 void UploadQueue::wait() noexcept

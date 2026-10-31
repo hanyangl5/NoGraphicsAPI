@@ -161,7 +161,8 @@ static_assert(gpu::detail::is_same_v<__underlying_type(gpu::Error), uint8> &&
 static_assert(static_cast<uint8>(gpu::Error::none) == 0 &&
               static_cast<uint8>(gpu::Error::unsupported) == 1 &&
               static_cast<uint8>(gpu::Error::device_lost) == 2 &&
-              static_cast<uint8>(gpu::Error::driver_error) == 3);
+              static_cast<uint8>(gpu::Error::driver_error) == 3 &&
+              static_cast<uint8>(gpu::Error::out_of_memory) == 4);
 static_assert(static_cast<uint32>(gpu::TextureUsage::sampled | gpu::TextureUsage::storage) == 3);
 static_assert(static_cast<uint64>(gpu::Stage::vertex | gpu::Stage::fragment) == 68);
 static_assert(static_cast<uint64>(gpu::Stage::task) == (1ull << 3u));
@@ -312,7 +313,7 @@ static_assert(sizeof(gpu::TextureFormatInfo) == 16 &&
               offsetof(gpu::TextureFormatInfo, bytes_per_block) == 8 &&
               offsetof(gpu::TextureFormatInfo, stencil) == 13);
 static_assert(sizeof(gpu::SwapchainFrame) == 16 && offsetof(gpu::SwapchainFrame, extent) == 8);
-static_assert(sizeof(gpu::TextureDesc) == 32 && offsetof(gpu::TextureDesc, extent) == 4);
+static_assert(sizeof(gpu::TextureDesc) == 32 && offsetof(gpu::TextureDesc, extent) == 4 && offsetof(gpu::TextureDesc, usage) == 28);
 static_assert(sizeof(gpu::TextureCopyDesc) == 56 && offsetof(gpu::TextureCopyDesc, offset) == 12 &&
               offsetof(gpu::TextureCopyDesc, extent) == 24);
 static_assert(sizeof(gpu::Viewport) == 24 && alignof(gpu::Viewport) == 4 &&
@@ -348,6 +349,7 @@ constexpr gpu::DeviceDesc default_device_desc{};
 static_assert(default_device_desc.window == nullptr &&
               default_device_desc.swapchain_format == gpu::Format::undefined &&
               default_device_desc.desired_swapchain_image_count == 2 && default_device_desc.desired_queue_count == 1 &&
+              !default_device_desc.steam_overlay_compatibility &&
               default_device_desc.desired_compute_queue_count == 0 && default_device_desc.desired_copy_queue_count == 0 &&
               default_device_desc.timestamp_query_count == 256);
 constexpr gpu::uint32x2 default_uint32x2{};
@@ -497,7 +499,8 @@ using DestroyGpuHeapFunction = void (*)(const gpu::GpuHeap&) noexcept;
 using CreateTextureHeapFunction = gpu::TextureHeap (*)(gpu::Device*, uint64) noexcept;
 using DestroyTextureHeapFunction = void (*)(const gpu::TextureHeap&) noexcept;
 using GetTextureSizeAlignFunction = gpu::SizeAlign (*)(gpu::Device*, const gpu::TextureDesc&) noexcept;
-using CreateTextureFunction = gpu::Texture* (*)(gpu::CommandBuffer*, const gpu::TextureDesc&, const gpu::TextureHeap&, uint64) noexcept;
+using CreateTextureFunction = gpu::Texture* (*)(gpu::Device*, const gpu::TextureDesc&, const gpu::TextureHeap&, uint64) noexcept;
+using InitializeTextureFunction = void (*)(gpu::CommandBuffer*, gpu::Texture*) noexcept;
 using CreateDeviceFunction = gpu::DeviceInit (*)(const gpu::DeviceDesc&) noexcept;
 using GetDrawableExtentFunction = gpu::uint32x2 (*)(gpu::Device*) noexcept;
 using AcquireFunction = gpu::SwapchainFrame (*)(gpu::CommandBuffer*) noexcept;
@@ -533,6 +536,7 @@ static_assert(gpu::detail::is_same_v<decltype(&gpu::create_texture_heap), Create
 static_assert(gpu::detail::is_same_v<decltype(&gpu::destroy_texture_heap), DestroyTextureHeapFunction>);
 static_assert(gpu::detail::is_same_v<decltype(&gpu::get_texture_size_align), GetTextureSizeAlignFunction>);
 static_assert(gpu::detail::is_same_v<decltype(&gpu::create_texture), CreateTextureFunction>);
+static_assert(gpu::detail::is_same_v<decltype(&gpu::initialize_texture), InitializeTextureFunction>);
 static_assert(gpu::detail::is_same_v<decltype(&gpu::create_device), CreateDeviceFunction>);
 static_assert(gpu::detail::is_same_v<decltype(&gpu::get_drawable_extent), GetDrawableExtentFunction>);
 static_assert(gpu::detail::is_same_v<decltype(&gpu::acquire), AcquireFunction>);
@@ -574,6 +578,7 @@ static_assert(__is_constructible(CommandBatch, std::initializer_list<gpu::Comman
         .window = native_window,
         .swapchain_format = gpu::Format::bgra8_srgb,
         .desired_swapchain_image_count = 3,
+        .steam_overlay_compatibility = true,
         .timestamp_query_count = 513,
     });
     const gpu::DeviceCaps& caps = gpu::get_device_caps(device);
@@ -602,7 +607,8 @@ static_assert(__is_constructible(CommandBatch, std::initializer_list<gpu::Comman
 
     const gpu::SizeAlign texture_size_align = gpu::get_texture_size_align(device, {});
     gpu::TextureHeap texture_heap = gpu::create_texture_heap(device, texture_size_align.size);
-    gpu::Texture* created_texture = gpu::create_texture(commands, {}, texture_heap, 0);
+    gpu::Texture* created_texture = gpu::create_texture(device, {}, texture_heap, 0);
+    gpu::initialize_texture(commands, created_texture);
     gpu::RenderView* created_render_view = gpu::create_render_view(texture);
     gpu::write_texture_descriptor(texture_descriptors, 0, texture, gpu::TextureDescriptorType::sampled);
     gpu::write_sampler_descriptor(sampler_descriptors, 0);
@@ -624,12 +630,12 @@ static_assert(__is_constructible(CommandBatch, std::initializer_list<gpu::Comman
     uint64 timestamps[2]{};
     gpu::write_timestamp(a, timestamps);
     gpu::write_timestamp(b, timestamps + 1, gpu::Stage::transfer);
-    gpu::bind_pso(a, pso);
     gpu::set_texture_descriptor_heap(a, texture_descriptors);
     gpu::set_sampler_descriptor_heap(a, sampler_descriptors);
     gpu::begin_render_pass(a, {
                                   .colors = {{.render_view = render_view}},
                               });
+    gpu::bind_pso(a, pso);
     gpu::set_viewport(a, {});
     gpu::set_scissor(a, {});
     gpu::set_depth_stencil(a, {});
@@ -640,6 +646,7 @@ static_assert(__is_constructible(CommandBatch, std::initializer_list<gpu::Comman
     gpu::draw_meshlets(a, root, {.x = 1, .y = 1, .z = 1});
     if (caps.indirect_mesh_draw) gpu::draw_meshlets_indirect(a, root, range);
     gpu::end_render_pass(a);
+    gpu::bind_pso(a, compute);
     gpu::dispatch(a, root, {.x = 1, .y = 1, .z = 1});
     gpu::dispatch_indirect(a, root, range);
     gpu::copy_memory(a, range, range);

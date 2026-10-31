@@ -9,7 +9,6 @@ struct RootData
     uint32 values[60];
 };
 
-struct RootDataPointer
-{
-    RootData* address;
-};
+#if !defined(__SLANG__)
+static_assert(sizeof(RootData) == 256);
+#endif

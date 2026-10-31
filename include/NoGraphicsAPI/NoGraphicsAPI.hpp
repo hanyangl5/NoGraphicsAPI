@@ -36,7 +36,14 @@ enum class Error : uint8
     unsupported,
     device_lost,
     driver_error,
+    out_of_memory,
 };
+
+using ErrorCallback = void (*)(const char* message, bool fatal) noexcept;
+
+// Synchronous diagnostics on the calling thread; message is valid only during the callback. Do not call graphics APIs recursively.
+// The thread-local callback defaults to nullptr. Fatal execution errors still abort after the callback returns.
+void set_error_callback(ErrorCallback callback) noexcept;
 
 enum class MemoryType : uint8
 {
@@ -438,7 +445,7 @@ struct DeviceCaps
     uint64 max_push_data_size = 0;
     // Common element size for suballocating TextureHeap storage; every SizeAlign::align divides this value.
     uint64 texture_heap_alignment = 0;
-    float timestamp_period_ns = 0.0f; // Nanoseconds per timestamp tick.
+    float timestamp_period_ns = 0.0f; // Nanoseconds per timestamp tick; zero when profiling is unavailable.
     uint32 sub_texel_precision_bits = 0; // Fractional filtering precision, for conservative sampled-field bounds.
     bool texture_compression_bc = false;
     bool texture_compression_astc = false;
@@ -446,14 +453,18 @@ struct DeviceCaps
     bool indirect_mesh_draw = false;
 };
 
-// Win32 windowed device creation/destruction, drawable queries, acquire, and presentation stay on the window's message-pump thread.
+enum class ColorSpace : uint32 { srgb, extended_srgb_linear };
+
+// Win32 windowed device lifecycle, swapchain format/extent changes, acquire, and presentation stay on the window's message-pump thread.
 // Metal calls may use a render thread; synchronize CAMetalLayer access with native UI/layer changes.
 // The window/layer must outlive the device. Other calls follow the object-level threading contract below.
 struct DeviceDesc
 {
     void* window = nullptr; // HWND on Windows; CAMetalLayer* on macOS/iOS. Null creates a headless device.
     Format swapchain_format = Format::undefined;
+    ColorSpace swapchain_color_space = ColorSpace::srgb;
     uint32 desired_swapchain_image_count = 2; // Vulkan: 1..8 presentation contexts. Metal clamps to 2..3 drawables.
+    bool steam_overlay_compatibility = false; // macOS only: allow drawable texture views and use classic Metal presentation.
     // Counts are capped to each family's capacity. A nonzero request requires that kind of queue to be available.
     uint32 desired_queue_count = 1; // General graphics + compute queues; must be nonzero.
     uint32 desired_compute_queue_count = 0;
@@ -682,11 +693,15 @@ constexpr RenderingFlags operator|(RenderingFlags lhs, RenderingFlags rhs) noexc
 // Concurrent descriptor updates require disjoint destinations, and copy source slots must not be modified by another update.
 // Each (device, queue_index) and command pool (including recording its buffers) is externally synchronized; different queues/pools may run concurrently.
 // Device idle/destruction requires exclusive access. Destroy command pools before their device. There are no internal queue or pool locks.
+// Initialization and resource creation failures return an Error, nullptr, or an empty aggregate; details go to the optional error callback.
 [[nodiscard]] DeviceInit create_device(const DeviceDesc& desc = {}) noexcept;
 void destroy_device(Device* device) noexcept;
 [[nodiscard]] const DeviceCaps& get_device_caps(const Device* device) noexcept;
 [[nodiscard]] bool supports_texture_format(const Device* device, Format format, TextureUsage usage) noexcept;
 [[nodiscard]] uint32x2 get_drawable_extent(Device* device) noexcept;
+// Call after wait_idle, outside an acquired frame. Unsupported pairs leave the current mode unchanged.
+// A zero-size drawable defers swapchain recreation until acquire sees a nonzero extent.
+[[nodiscard]] Error set_swapchain_format(Device* device, Format format, ColorSpace color_space) noexcept;
 
 [[nodiscard]] TimelineSemaphore* create_timeline_semaphore(Device* device, uint64 initial_value = 0) noexcept;
 void destroy_timeline_semaphore(TimelineSemaphore* semaphore) noexcept;
@@ -701,6 +716,7 @@ void wait_idle(Device* device) noexcept;
 void submit_and_present(Device* device, const SubmitDesc& desc) noexcept;
 
 // Every non-null returned pointer is 16-byte aligned. GPU heaps are raw blocks for application-side suballocation.
+// Metal and Vulkan without device-address commands support at most 64 live GPU heaps per device.
 [[nodiscard]] GpuHeap create_gpu_heap(Device* device, uint64 byte_count, MemoryType memory = MemoryType::cpu_visible) noexcept;
 void destroy_gpu_heap(const GpuHeap& heap) noexcept;
 
@@ -716,13 +732,13 @@ template<typename T>
 }
 
 // Texture heaps use one device-selected GPU-only memory type and must outlive every placed texture.
-// Placements must satisfy get_texture_size_align(), remain non-overlapping, and not be reused before the timeline point covering their last use completes.
+// Placements must satisfy get_texture_size_align(). Overlapping textures require disjoint periods of GPU use and reinitialization after aliased writes.
 // DeviceCaps::texture_heap_alignment can be used as a common allocator element size, avoiding per-placement leading alignment padding.
 [[nodiscard]] TextureHeap create_texture_heap(Device* device, uint64 byte_count) noexcept;
 void destroy_texture_heap(const TextureHeap& heap) noexcept;
 [[nodiscard]] SizeAlign get_texture_size_align(Device* device, const TextureDesc& desc) noexcept;
-// Records texture initialization into commands. Use outside of a render pass. Commands must be submitted before other use of the texture.
-[[nodiscard]] Texture* create_texture(CommandBuffer* commands, const TextureDesc& desc, const TextureHeap& heap, uint64 offset) noexcept;
+// Creates an uninitialized texture without recording GPU commands. Views and descriptors can be created before initialize_texture().
+[[nodiscard]] Texture* create_texture(Device* device, const TextureDesc& desc, const TextureHeap& heap, uint64 offset) noexcept;
 void destroy_texture(Texture* texture) noexcept;
 [[nodiscard]] RenderView* create_render_view(Texture* texture, const RenderViewDesc& desc = {}) noexcept;
 void destroy_render_view(RenderView* render_view) noexcept;
@@ -760,6 +776,13 @@ void submit(Device* device, const SubmitDesc& desc, uint32 queue_index = 0) noex
 void set_texture_descriptor_heap(CommandBuffer* commands, TextureDescriptorHeap* heap) noexcept;
 void set_sampler_descriptor_heap(CommandBuffer* commands, SamplerDescriptorHeap* heap) noexcept;
 
+// Initialize whole-texture metadata outside a render pass before first GPU use and before reuse after writes through an alias.
+// Texture aliasing uses overlapping placements in one TextureHeap; no creation flag is required.
+// Synchronize prior storage accesses and make their writes available with barriers or timeline waits first; these do not initialize metadata.
+// Discards contents; clear or overwrite before reading. Orders initialization before subsequent texture accesses on this queue.
+void initialize_texture(CommandBuffer* commands, Texture* texture) noexcept;
+
+// Command GPU ranges must lie within one GPU heap.
 void copy_memory(CommandBuffer* commands, GpuRange source, GpuRange destination) noexcept;
 // Depth/stencil copies require a general queue. Copy-only queues also require DeviceCaps::copy_texture_granularity alignment.
 void copy_memory_to_texture(CommandBuffer* commands, GpuRange source, Texture* destination, const TextureCopyDesc& copy = {}) noexcept;
@@ -775,9 +798,12 @@ void write_timestamp(CommandBuffer* commands, uint64* cpu_destination, Stage sta
 // Call before resetting the pool; reset discards unread results. Unsubmitted buffers are ignored.
 void read_timestamps(CommandPool* pool) noexcept;
 
+// Every render pass starts with no graphics PSO. Bind one inside the pass before drawing, including every resumed segment.
+// Render-pass boundaries invalidate the current PSO selection; rebind a compute PSO before dispatching after a render pass.
 // Each segment needs matching attachments, load/store operations, and clear values, and its own begin/end_render_pass pair.
 // Submit the complete suspend/resume chain in order in one batch. No action or synchronization commands may occur between segments.
-// Resuming skips load/clear operations; suspending defers store operations. Command-buffer bindings are not inherited.
+// The first/last segments apply the requested load/store operations.
+// Command-buffer bindings are not inherited.
 void begin_render_pass(CommandBuffer* commands, const RenderingDesc& desc, RenderingFlags flags = RenderingFlags::none) noexcept;
 void end_render_pass(CommandBuffer* commands) noexcept;
 
@@ -786,9 +812,11 @@ void set_viewport(CommandBuffer* commands, const Viewport& viewport) noexcept;
 void set_scissor(CommandBuffer* commands, const Scissor& scissor) noexcept;
 void set_depth_stencil(CommandBuffer* commands, const DepthStencilState& state) noexcept;
 
+// Bind graphics/mesh PSOs inside an active render pass; bind compute PSOs outside render passes.
 void bind_pso(CommandBuffer* commands, const PSO* pso) noexcept;
 
-// root is a 16-byte-aligned GPU address, or nullptr for shaders without root data. Retain its storage through GPU completion.
+// root uses the shared constant-buffer layout and a 16-byte-aligned GPU address, or nullptr for rootless shaders.
+// Retain its storage through GPU completion.
 // Finish CPU writes before submission; wait for prior GPU users before overwriting. Synchronize GPU writes before consuming the root.
 // Storage is application-owned; these commands do not copy root bytes or allocate memory.
 void draw(CommandBuffer* commands, const void* root, uint32 vertex_count, uint32 instance_count = 1, uint32 first_vertex = 0,

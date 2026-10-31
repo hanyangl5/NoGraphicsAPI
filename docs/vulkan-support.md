@@ -27,7 +27,7 @@ conventional feature checked by device creation.
 | Vulkan 1.4 and `maintenance5` | Modern pipeline creation, including inline shader code without temporary shader modules. |
 | [`VK_EXT_descriptor_heap`][descriptor-heap] | Application-owned heaps, host descriptor writes, layout-free pipelines, and `vkCmdPushDataEXT`. |
 | [`VK_KHR_shader_untyped_pointers`][untyped-pointers] | Supplies the shader-untyped-pointer capability required by the descriptor-heap SPIR-V path. |
-| [`VK_KHR_device_address_commands`][address-commands] | Index, indirect, and copy commands consume GPU addresses rather than buffer handles. |
+| [`VK_KHR_device_address_commands`][address-commands] (optional) | Index, indirect, and copy commands consume GPU addresses directly. Otherwise addresses resolve to buffers and offsets. |
 | [`VK_KHR_unified_image_layouts`][unified-layouts] (optional) | Optimizes ordinary `GENERAL` image use; the public model is unchanged without it. |
 | [`VK_EXT_mesh_shader`][mesh-shader] | Required task and mesh shader support for direct and indirect workgroup draws. |
 | Buffer device address | Gives GPU heaps 64-bit shader addresses for their lifetime and enables typed pointer fields in shared structures. |
@@ -57,6 +57,11 @@ provide addressable data storage. Opaque texture and sampler descriptor heaps us
 `readback` prefers CPU-cached memory within the same device-local requirements; caching is not guaranteed.
 For repeated CPU reads such as image encoding, copy completed readback data once into ordinary CPU memory.
 `GpuCpuRange<T>::size` is always bytes, regardless of `T`, and a GPU-only heap has a null CPU pointer.
+
+When device-address commands are unavailable, index, indirect and copy operations resolve addresses through
+the same table used by Metal. Each command range must fit in one GPU heap; at most 64 GPU heaps may be live
+per device. Lookups use binary search with atomic version checks; only table updates serialize.
+Devices with the extension pass command addresses directly and do not allocate the table.
 
 Application data has no backend suballocator. The optional utility library provides fixed-16-byte
 `BumpAllocator` and reusable `HeapAllocator` policies over `GpuHeap::range`; the graphics API does not
@@ -112,9 +117,10 @@ in root data; indexed draws bind only the index address range required by Vulkan
 
 Texture and sampler descriptors live in opaque `TextureDescriptorHeap` and `SamplerDescriptorHeap`
 objects created with application-selected slot capacities. `write_texture_descriptor(heap, index, ...)`
-and `write_sampler_descriptor(heap, index, ...)` encode descriptors into private mapped storage.
-`copy_texture_descriptors()` and `copy_sampler_descriptors()` copy indexed ranges synchronously on the CPU,
-including overlapping ranges. Native bytes, strides, reserved regions, and GPU addresses remain private.
+and `write_sampler_descriptor(heap, index, ...)` encode descriptors in a cached CPU array allocated with the heap,
+then copy those bytes to private mapped storage. `copy_texture_descriptors()` and `copy_sampler_descriptors()`
+copy indexed ranges through that CPU array, including overlapping ranges, without reading mapped GPU memory.
+Native bytes, strides, reserved regions, and GPU addresses remain private.
 
 `set_texture_descriptor_heap()` and `set_sampler_descriptor_heap()` bind those heaps. Shaders retain
 native resource and sampler heap access through the shared `gpu_texture` and `gpu_sampler`
@@ -144,13 +150,25 @@ allows eager heap creation, so `SizeAlign` deliberately exposes no memory-type b
 `get_texture_size_align()` reports a concrete texture's placement requirement.
 `DeviceCaps::texture_heap_alignment` is the common allocator granularity selected for the supported
 profile; it is not a Vulkan guarantee for arbitrary image create descriptions. Utility
-`TextureAllocator` uses that granularity and returns a POD `PlacedTexture`. Pass the aggregate back to
+`TextureAllocator` uses that granularity and returns a POD `PlacedTexture` containing an uninitialized texture. Pass the aggregate back to
 the same allocator after GPU use has completed. The API does not track texture-to-heap or
 texture-to-descriptor dependencies.
 
 Texture upload and readback go through buffer-backed `GpuRange` values with
 `copy_memory_to_texture()` and `copy_texture_to_memory()`. The application retires texture-heap ranges
 with its submission timeline.
+
+`create_texture(device, desc, heap, offset)` creates and binds an image without recording GPU commands.
+Views and descriptors can be created immediately. Before first GPU use, call `initialize_texture(commands, texture)`
+outside rendering to initialize its metadata with a whole-image `UNDEFINED` to `GENERAL` transition.
+This discards contents; clear or overwrite the texture before reading it.
+
+Textures can share a placement with disjoint periods of GPU use. Reserve enough bytes and alignment
+for every image, and reinitialize the incoming texture after writes through another alias. The caller
+must synchronize prior storage accesses and make writes available with ordinary barriers or timeline
+waits before initialization. Initialization orders its metadata work before subsequent texture accesses;
+it does not issue a global memory barrier. Views and descriptors remain resident, and the backend has no alias registry.
+See Vulkan's [memory aliasing rules](https://docs.vulkan.org/spec/latest/chapters/resources.html#resources-memory-aliasing).
 
 ## Root ABI
 
@@ -170,6 +188,9 @@ so command buffers remain entirely in descriptor-heap mode.
 
 The shader's binding-zero uniform buffer maps directly to the address in push data through
 [`VK_DESCRIPTOR_MAPPING_SOURCE_PUSH_ADDRESS_EXT`](https://docs.vulkan.org/refpages/latest/refpages/source/VkDescriptorSetAndBindingMappingEXT.html).
+This preserves uniform-buffer access instead of physical-storage-buffer loads through a BDA pointer,
+allowing the driver to use its constant-buffer optimizations and prefetch paths.
+BDA can receive equivalent optimizations, so any performance advantage depends on the GPU, driver and workload.
 There is no root descriptor or descriptor-set binding. The shader ABI changes from a full push-data
 structure to one address; rebuild existing Vulkan shader binaries. Separate roots per stage and
 GPU-generated binding commands are not exposed. The GPU can select additional data through pointers stored inside the root.
@@ -190,7 +211,7 @@ efficient rather than merely legal.
 
 The backend privately handles the two unavoidable cases:
 
-- a newly created image receives its initial `UNDEFINED` to `GENERAL` transition before first use;
+- `initialize_texture()` transitions a newly created or reused image from `UNDEFINED` to `GENERAL`;
 - swapchain images transition between `GENERAL` and `PRESENT_SRC_KHR` around presentation.
 
 Resource-free barriers do not imply automatic synchronization. Applications still issue a barrier
@@ -211,6 +232,11 @@ load/store state and clears are specified at the rendering call. Barriers remain
 not implied by rendering boundaries. Each `begin_render_pass()` sets a full render-area viewport and
 scissor and disables depth/stencil, preventing state from leaking between passes. Applications call
 `set_viewport()`, `set_scissor()`, or `set_depth_stencil()` after beginning a pass to override those defaults.
+Bind a graphics or mesh PSO inside each pass before drawing, including resumed segments; relying on a
+previous pass's pipeline binding is outside the API contract.
+Rebind compute before dispatching after a render pass as well. The wrapper stores no selected PSO and never restores one;
+only explicit `bind_pso()` calls emit `vkCmdBindPipeline`. Vulkan preserves native bindings across rendering boundaries,
+so semantic invalidation does not clear native state or diagnose a missing bind.
 
 `RenderingFlags::suspending` and `resuming` split one pass across independently recorded command buffers.
 Each segment repeats the rendering description and has its own begin/end pair; only the first loads
@@ -282,6 +308,17 @@ Windowed device creation/destruction, drawable queries, acquire, and presentatio
 message-pump thread; other work follows the threading rules above. Binary WSI semaphores remain private, while
 `VK_KHR_swapchain_maintenance1` present fences support safe reuse and swapchain replacement without
 draining unrelated queue work.
+
+`DeviceDesc::swapchain_color_space` defaults to `ColorSpace::srgb`. Windowed devices enable
+`VK_EXT_swapchain_colorspace` when advertised, including devices starting in SDR. Extended output
+requires that extension and an advertised format/color-space pair; use `Format::rgba16_float` with
+`ColorSpace::extended_srgb_linear` for FP16 scRGB output. Unsupported requests fail device creation.
+
+`set_swapchain_format()` changes the pair while retaining the device and application resources.
+Call it on the presentation thread after `wait_idle()`, with no acquired frame. Unsupported pairs
+leave the previous mode usable; a zero-size drawable defers recreation until its extent is nonzero.
+Resize preserves the selected pair. The application owns display/HDR-state detection and must supply
+pixels in the selected color space; the backend does not change OS display settings or tone-map output.
 
 ## Validation
 
